@@ -4,6 +4,9 @@ const path = require('path');
 const auth = require('../middleware/auth');
 const PDF = require('../models/PDF');
 const router = express.Router();
+const fs = require('fs');
+const { PDFDocument, rgb } = require('pdf-lib');
+const Annotation = require('../models/Annotation');
 
 // Multer storage + filter
 const storage = multer.diskStorage({
@@ -75,6 +78,43 @@ router.get('/:id/download', auth, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ msg: 'Server error' });
+  }
+});
+
+router.get('/:id/export', auth, async (req, res) => {
+  try {
+    const pdfMeta = await PDF.findById(req.params.id);
+    if (!pdfMeta || pdfMeta.user.toString() !== req.user.id) return res.status(404).json({ msg: 'PDF not found' });
+
+    // Load original PDF
+    const filePath = path.join(__dirname, '..', 'uploads', pdfMeta.filename);
+    const existingPdfBytes = fs.readFileSync(filePath);
+    const pdfDoc = await PDFDocument.load(existingPdfBytes);
+    const pages = pdfDoc.getPages();
+
+    // Fetch annotations
+    const annotations = await Annotation.find({ pdf: pdfMeta._id });
+    annotations.forEach(a => {
+      const page = pages[a.page - 1];
+      const pageIndex = a.page - 1;
+      if (pageIndex < 0 || pageIndex >= pages.length) return;
+      const { x, y, width, height } = a.coords;
+      const drawY = page.getHeight() - y - height;
+      // Simple color mapping
+      const colorMap = { yellow: [1,1,0], green: [0,1,0], red: [1,0,0] };
+      const [r,g,b] = colorMap[a.color] || [1,1,0];
+      page.drawRectangle({ x, y: drawY, width, height, borderColor: rgb(r,g,b), borderWidth: 2, color: rgb(r,g,b,0.2) });
+      if (a.comment) {
+        page.drawText(a.comment, { x, y: drawY - 12, size: 10, color: rgb(0,0,0) });
+      }
+    });
+
+    const pdfBytes = await pdfDoc.save();
+    res.set({ 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename=annotated_${pdfMeta._id}.pdf` });
+    res.send(pdfBytes);
+  } catch (err) {
+    console.error('Export error:', err);
+    res.status(500).json({ msg: 'Server error exporting PDF' });
   }
 });
 
